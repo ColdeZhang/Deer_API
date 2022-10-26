@@ -5,6 +5,11 @@ from fastapi import FastAPI, File, UploadFile, responses
 from fastapi.responses import StreamingResponse
 from mcstatus import MinecraftServer, MinecraftBedrockServer
 import requests
+from pydantic import BaseModel
+import math
+import sys
+import yaml
+import os
 
 server = FastAPI()
 
@@ -186,3 +191,102 @@ async def getSkin(playerID: str):
         return StreamingResponse(skin, media_type="image/png")
     else:
         return {"error": "Can't access Mojiang server or no such user!"}
+
+class Item(BaseModel):
+    Data: dict = None
+
+#192.168.163.235:8000/api/eccom/tfapp/aifactory/eventpost
+@server.post("/eccom/tfapp/aifactory/eventpost")
+async def eventpost(item: Item):
+    print(item)
+    return {"success": "Online!",
+            "item": item}
+
+
+def findResidenceSavePath(serverRootPath: str, worldName: str) -> str:
+    """
+    根据需要生成领地存档文件的地址。
+    :param serverRootPath:服务器根目录
+    :param worldName:需要操作的世界
+    :return: 对应存档文件地址
+    """
+    print("|正在查找领地存档文件。")
+    resWorldYml = "res_" + worldName + ".yml"
+    path = os.path.join(serverRootPath, "plugins/Residence/Save/Worlds", resWorldYml)
+    # noinspection PyBroadException
+    try:
+        file = open(path, 'r', encoding="utf-8")
+        file.close()
+        print("|成功：领地存档地址为" + path)
+    except:
+        print("|错误：未找到配置文件，请确认已安装领地插件？")
+        sys.exit("程序终止。")
+    return path
+
+
+def getResidencesArea(residenceSavePath: str) -> list:
+    """
+    获取领地配置文件中领地的区域两点坐标。
+    :param residenceSavePath: 配置文件的位置
+    :return: 所有领地区域的两点坐标（列表）
+    """
+    print("|正在分析配置文件。")
+    resAreas: list = []
+
+    resSaveFile = open(residenceSavePath, 'r', encoding="utf-8")
+    resSaveData = resSaveFile.read()
+    resSaveFile.close()
+
+    resData = list(yaml.load(resSaveData, Loader=yaml.FullLoader)["Residences"].values())
+    for residence in resData:
+        coordinatesStrList = list(residence["Areas"].values())[0].split(':')
+        resAreaCoordinate: dict = {"x1": int(coordinatesStrList[0]), "x2": int(coordinatesStrList[3]),
+                                   "y1": int(coordinatesStrList[1]), "y2": int(coordinatesStrList[4]),
+                                   "z1": int(coordinatesStrList[2]), "z2": int(coordinatesStrList[5])}
+        resAreas.append(resAreaCoordinate)
+    print("|共找到：" + str(len(resAreas)) + " 个领地。")
+    return resAreas
+
+
+def convertAreaToChunk(residenceAreaList: list) -> list:
+    """
+    将区域坐标转换为区块坐标。
+    :param residenceAreaList: 领地区域两点（列表）
+    :return: 有效的区块区域两点坐标（列表）
+    """
+    print("|正在将领地坐标转换为区块区域。")
+    resChunks: list = []
+    square: int = 0
+    for area in residenceAreaList:
+        chunkCoordinate: dict = {"x1": math.ceil(area["x1"] / 16), "x2": math.ceil(area["x2"] / 16),
+                                 "z1": math.ceil(area["z1"] / 16), "z2": math.ceil(area["z2"] / 16)}
+        resChunks.append(chunkCoordinate)
+        square += abs(chunkCoordinate["x1"] - chunkCoordinate["x2"]) * abs(
+            chunkCoordinate["z1"] - chunkCoordinate["z2"])
+    print("|共有：" + str(square) + "个有效区块。")
+    return resChunks
+
+@server.get("/mc/isSafe/{pos}")
+async def isSafe(pos:int, x:int, z:int):
+    print(x,z)
+    res_path = findResidenceSavePath("/home/deer/viceDisk/mcserver/PureSurvival","world")
+    safe_cord = []
+    res_area = []
+    if res_area != getResidencesArea(res_path):
+        res_area = getResidencesArea(res_path)
+        chunck_area = convertAreaToChunk(res_area)
+        region_area: list = []
+        for area in chunck_area:
+            regionCoordinate: dict = {"x1": math.ceil(area["x1"] / 32), "x2": math.ceil(area["x2"] / 32),
+                                    "z1": math.ceil(area["z1"] / 32), "z2": math.ceil(area["z2"] / 32)}
+            if regionCoordinate not in region_area:
+                region_area.append(regionCoordinate)
+        for area in region_area:
+            cord: dict = {"x1": (area["x1"]-1)*32*16, "x2": (area["x2"]+1)*32*16,
+                        "z1": (area["z1"]-1)*32*16, "z2": (area["z2"]+1)*32*16}
+            print(cord)
+            safe_cord.append(cord)
+    for area in safe_cord:
+        if x>=area["x1"] and x<=area["x2"] and z>=area["z1"] and z<=area["z2"]:
+            return {"msg": "这个坐标在安全区域内，不会因为大更新被删除。"}
+    return {"msg": "这个坐标不安全，在版本更新的时候地图数据会被删除，如果不想被删除可以在此区域圈一个小的临时领地。"}
